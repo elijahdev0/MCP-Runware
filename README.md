@@ -1,5 +1,7 @@
 # Runware MCP Server
 
+[![smithery badge](https://smithery.ai/badge/@elijahdev0/mcp-runware1)](https://smithery.ai/server/@elijahdev0/mcp-runware1)
+
 A powerful Model Context Protocol (MCP) server that provides lightning fast image and video generation tools using the [Runware API](https://runware.ai). This server supports both SSE (Server-Sent Events) transport for custom claude connector and direct claude desktop installation as well.
 
 ## Features
