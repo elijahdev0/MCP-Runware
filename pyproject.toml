@@ -18,7 +18,11 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp",
-    "requests>=2.31.0"
+    "requests>=2.31.0",
+    "uvicorn>=0.38.0",
+    "python-dotenv>=1.0.0",
+    "smithery>=0.2.2",
+    "starlette>=0.50.0"
 ]
 
 [tool.setuptools]

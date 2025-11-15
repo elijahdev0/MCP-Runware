@@ -151,7 +151,7 @@ def inferenceRequest(genConfig: Dict[str, Any]) -> Dict[str, Any]:
     """
     # Get and validate environment variables
     api_key = os.getenv("RUNWARE_API_KEY")
-    api_base_url = DEFAULT_API_BASE_URL
+    api_base_url = os.getenv("RUNWARE_BASE_URL", DEFAULT_API_BASE_URL)
     session_timeout = DEFAULT_TIMEOUT
     
     if not api_key:
@@ -300,6 +300,5 @@ def pollVideoCompletion(taskUUID: str) -> Dict[str, Any]:
             
             if status != "processing":
                 return poll_result
-
 
 

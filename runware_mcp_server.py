@@ -1,52 +1,26 @@
 """
-runware_mcp_server.py
+Runware MCP server that supports both Streamable HTTP (for Smithery-hosted deployments)
+and STDIO transports (for backwards compatibility).
 
-This file implements a Runware MCP server using the SSE (Server-Sent Events) transport protocol.
-It uses the FastMCP framework to expose tools that clients can call over an SSE connection.
-SSE allows real-time, one-way communication from server to client over HTTP — ideal for pushing model updates.
-
-The server uses:
-- `Starlette` for the web server
-- `uvicorn` as the ASGI server
-- `FastMCP` from `mcp.server.fastmcp` to define the tools
-- `SseServerTransport` to handle long-lived SSE connections
+When running in HTTP mode, the server exposes the `/mcp` endpoint required by the MCP
+Streamable HTTP specification by leveraging FastMCP's `streamable_http_app` helper and
+adding middleware to parse Smithery session configuration.
 """
-
-
-#   [ MCP Client / Agent in Browser ]
-#                  |
-#      (connects via SSE over HTTP)
-#                  |
-#           [ Uvicorn Server ]
-#                  |
-#          (ASGI Protocol Bridge)
-#                  |
-#           [ Starlette App ]
-#                  |
-#           [ FastMCP Server ]
-#                  |
-#     @mcp.tool() like `imageInference`, `photoMaker`, `videoInference`, etc.
-#                  |
-#           [ Runware API ]
 
 import os
 import asyncio
 import json
 import base64
 import time
+import contextvars
 import requests
 from typing import TypedDict, Dict, Any, Optional, List, Union
 from uuid import UUID
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from mcp.server import Server  # Underlying server abstraction used by FastMCP
-from mcp.server.sse import SseServerTransport  # The SSE transport layer
-
-from starlette.applications import Starlette  # Web framework to define routes
-from starlette.routing import Route, Mount  # Routing for HTTP and message endpoints
-from starlette.requests import Request  # HTTP request objects
-
-import uvicorn  # ASGI server to run the Starlette app
+from starlette.middleware.cors import CORSMiddleware
+import uvicorn
+from smithery.utils.config import parse_config_from_asgi_scope
 
 from utils.runwareUtils import inferenceRequest, genRandUUID, validateVideoDimensions, getModelDimensions, getSupportedVideoModels, pollVideoCompletion
 
@@ -57,6 +31,63 @@ DEFAULT_IMAGE_MODEL = "civitai:943001@1055701"
 DEFAULT_PHOTO_MAKER_MODEL = "civitai:139562@344487"
 DEFAULT_BG_REMOVAL_MODEL = "runware:109@1"
 DEFAULT_MASKING_MODEL = "runware:35@1"
+current_request_config: contextvars.ContextVar[Dict[str, Any]] = contextvars.ContextVar(
+    "smithery_config", default={}
+)
+
+
+def handle_config(config: Optional[Dict[str, Any]]) -> None:
+    """Apply configuration values to process-level environment variables."""
+    if not config:
+        return
+
+    api_key = config.get("RUNWARE_API_KEY")
+    base_url = config.get("RUNWARE_BASE_URL")
+    debug = config.get("DEBUG")
+
+    if api_key:
+        os.environ["RUNWARE_API_KEY"] = api_key
+    if base_url:
+        os.environ["RUNWARE_BASE_URL"] = base_url
+    if debug is not None:
+        os.environ["DEBUG"] = "1" if debug else "0"
+
+
+def get_request_config() -> Dict[str, Any]:
+    """Return the current request configuration stored in the context."""
+    try:
+        return current_request_config.get()
+    except LookupError:
+        return {}
+
+
+def get_config_value(key: str, default: Optional[Any] = None) -> Optional[Any]:
+    """Helper to read individual config values."""
+    return get_request_config().get(key, default)
+
+
+class SmitheryConfigMiddleware:
+    """ASGI middleware that parses Smithery config from query parameters."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        token = None
+        if scope.get("type") == "http":
+            try:
+                config = parse_config_from_asgi_scope(scope)
+            except Exception as exc:  # pragma: no cover - best effort logging
+                print(f"SmitheryConfigMiddleware: failed to parse config - {exc}")
+                config = {}
+            token = current_request_config.set(config)
+            handle_config(config)
+
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            if token is not None:
+                current_request_config.reset(token)
 
 def isClaudeUploadURL(url: str) -> bool:
     """Check if a URL is a Claude upload URL that should be rejected."""
@@ -1344,60 +1375,42 @@ async def imageUpload(file_path: str) -> dict:
 
 
 
-def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlette:
-    """
-    Constructs a Starlette app with SSE and message endpoints.
-
-    Args:
-        mcp_server (Server): The core MCP server instance.
-        debug (bool): Enable debug mode for verbose logs.
-
-    Returns:
-        Starlette: The full Starlette app with routes.
-    """
-    # Create SSE transport handler to manage long-lived SSE connections
-    sse = SseServerTransport("/messages/")
-
-    # This function is triggered when a client connects to `/sse`
-    async def handle_sse(request: Request) -> None:
-        """
-        Handles a new SSE client connection and links it to the MCP server.
-        """
-        # Open an SSE connection, then hand off read/write streams to MCP
-        async with sse.connect_sse(
-            request.scope,
-            request.receive,
-            request._send,  # Low-level send function provided by Starlette
-        ) as (read_stream, write_stream):
-            await mcp_server.run(
-                read_stream,
-                write_stream,
-                mcp_server.create_initialization_options(),
-            )
-
-    # Return the Starlette app with configured endpoints
-    return Starlette(
-        debug=debug,
-        routes=[
-            Route("/sse", endpoint=handle_sse),          # For initiating SSE connection
-            Mount("/messages/", app=sse.handle_post_message),  # For POST-based communication
-        ],
+def build_http_app():
+    """Create the FastMCP Streamable HTTP app with CORS + config middleware."""
+    app = mcp.streamable_http_app()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+        expose_headers=["mcp-session-id", "mcp-protocol-version"],
+        max_age=86400,
     )
+    return SmitheryConfigMiddleware(app)
+
+
+def main() -> None:
+    transport_mode = os.getenv("TRANSPORT", "stdio").lower()
+
+    if transport_mode == "http":
+        print("Runware MCP server starting in HTTP mode...")
+        app = build_http_app()
+        port = int(os.getenv("PORT", "8081"))
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level=os.getenv("UVICORN_LOG_LEVEL", "info"))
+    else:
+        print("Runware MCP server starting in STDIO mode...")
+        stdio_config: Dict[str, Any] = {}
+        if os.getenv("RUNWARE_API_KEY"):
+            stdio_config["RUNWARE_API_KEY"] = os.getenv("RUNWARE_API_KEY")
+        if os.getenv("RUNWARE_BASE_URL"):
+            stdio_config["RUNWARE_BASE_URL"] = os.getenv("RUNWARE_BASE_URL")
+        if os.getenv("DEBUG") is not None:
+            debug_env = os.getenv("DEBUG", "")
+            stdio_config["DEBUG"] = str(debug_env).lower() in ("1", "true", "yes")
+        handle_config(stdio_config or None)
+        mcp.run()
+
 
 if __name__ == "__main__":
-    # Get the underlying MCP server instance from FastMCP
-    mcp_server = mcp._mcp_server  # Accessing private member (acceptable here)
-
-    # Command-line arguments for host/port control
-    import argparse
-
-    parser = argparse.ArgumentParser(description='Run MCP SSE-based server')
-    parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
-    parser.add_argument('--port', type=int, default=8081, help='Port to listen on')
-    args = parser.parse_args()
-
-    # Build the Starlette app with debug mode enabled
-    starlette_app = create_starlette_app(mcp_server, debug=True)
-
-    # Launch the server using Uvicorn
-    uvicorn.run(starlette_app, host=args.host, port=args.port)
+    main()

@@ -1,3 +1,7 @@
 mcp
 requests
 fastmcp
+uvicorn
+python-dotenv
+smithery
+starlette

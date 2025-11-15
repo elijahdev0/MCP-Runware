@@ -10,8 +10,11 @@ COPY . /app
 # Install required Python packages from requirements.txt.
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Ensure the app runs in HTTP transport mode by default.
+ENV TRANSPORT=http
+
 # Expose port 8081 so that the container can accept incoming connections.
 EXPOSE 8081
 
-# Define the command to run your SSE server.
+# Define the command to run your HTTP MCP server.
 CMD ["python", "runware_mcp_server.py"]
