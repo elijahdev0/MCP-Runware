@@ -1,0 +1,31 @@
+runtime: "container"
+
+startCommand:
+  type: "http"
+  configSchema:
+    type: "object"
+    required:
+      - RUNWARE_API_KEY
+    properties:
+      RUNWARE_API_KEY:
+        type: "string"
+        title: "Runware API Key"
+        description: "API key from https://my.runware.ai used to authenticate image/video generation requests."
+      RUNWARE_BASE_URL:
+        type: "string"
+        title: "Runware Base URL"
+        description: "Optional override for the Runware API endpoint."
+      DEBUG:
+        type: "boolean"
+        title: "Enable Debug Logging"
+        default: false
+        description: "Toggle verbose logging when running the MCP server."
+  exampleConfig:
+    RUNWARE_API_KEY: "sk-runware-example"
+
+build:
+  dockerfile: "Dockerfile"
+  dockerBuildPath: "."
+
+env:
+  PORT: "8081"
