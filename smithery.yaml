@@ -1,4 +1,5 @@
 runtime: "container"
+target: "local"
 
 startCommand:
   type: "http"
